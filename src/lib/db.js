@@ -81,8 +81,8 @@ let tick = 0
 async function refresh(withProfiles = false) {
   if (!authId || pending) return
   const me = authId
-  const q = [supabase.from('swipes').select('*'), supabase.from('matches').select('*')]
-  if (withProfiles) q.push(supabase.from('profiles').select('id,email,data'))
+  const q = [supabase.from('unigo_swipes').select('*'), supabase.from('unigo_matches').select('*')]
+  if (withProfiles) q.push(supabase.from('unigo_profiles').select('id,email,data'))
   const [sw, ma, pr] = await Promise.all(q)
   const err = sw.error || ma.error || pr?.error
   if (err) return reportError(err)
@@ -92,8 +92,8 @@ async function refresh(withProfiles = false) {
   let sess = { data: [] }
   if (ids.length) {
     ;[msgs, sess] = await Promise.all([
-      supabase.from('messages').select('*').in('match_id', ids).order('at'),
-      supabase.from('learning_sessions').select('*').in('match_id', ids),
+      supabase.from('unigo_messages').select('*').in('match_id', ids).order('at'),
+      supabase.from('unigo_learning_sessions').select('*').in('match_id', ids),
     ])
     if (msgs.error || sess.error) return reportError(msgs.error || sess.error)
   }
@@ -131,7 +131,7 @@ async function enterSession(user) {
     // First sign-in for this account: create its profile.
     const profile = newProfile(user.email, user.user_metadata?.name || user.email.split('@')[0])
     state.users[authId] = profile
-    const { error } = await supabase.from('profiles').insert({ id: authId, email: user.email, data: strip(profile) })
+    const { error } = await supabase.from('unigo_profiles').insert({ id: authId, email: user.email, data: strip(profile) })
     if (error && error.code !== '23505') throw error
     await refresh(true)
   }
@@ -239,17 +239,17 @@ async function seedDemo(user) {
   const act = seedActivity()
   const profile = { ...priya, id: me, email: user.email, onboarded: true, createdAt: Date.now(), settings: {}, reads: Object.fromEntries(Object.entries(act.reads.u_priya || {}).map(([k, v]) => [p + k, v])) }
   const ops = [
-    supabase.from('profiles').upsert({ id: me, email: user.email, data: strip(profile) }),
-    supabase.from('swipes').upsert(act.swipes.map((s) => swipeRow({ ...s, from: mapId(s.from), to: mapId(s.to) }))),
+    supabase.from('unigo_profiles').upsert({ id: me, email: user.email, data: strip(profile) }),
+    supabase.from('unigo_swipes').upsert(act.swipes.map((s) => swipeRow({ ...s, from: mapId(s.from), to: mapId(s.to) }))),
   ]
   for (const r of await Promise.all(ops)) if (r.error) throw r.error
-  const m = await supabase.from('matches').upsert(act.matches.map((x) => matchRow({ ...x, id: p + x.id, users: x.users.map(mapId) })))
+  const m = await supabase.from('unigo_matches').upsert(act.matches.map((x) => matchRow({ ...x, id: p + x.id, users: x.users.map(mapId) })))
   if (m.error) throw m.error
   const msgs = Object.entries(act.messages).flatMap(([mid, list]) =>
     list.map((x) => messageRow(p + mid, { ...x, id: p + x.id, from: mapId(x.from), sessionId: x.sessionId && p + x.sessionId })),
   )
   const sess = act.sessions.map((s) => sessionRow({ ...s, id: p + s.id, matchId: p + s.matchId, proposer: mapId(s.proposer), partner: mapId(s.partner), teacher: mapId(s.teacher), learner: mapId(s.learner) }))
-  for (const r of await Promise.all([supabase.from('messages').upsert(msgs), supabase.from('learning_sessions').upsert(sess)])) if (r.error) throw r.error
+  for (const r of await Promise.all([supabase.from('unigo_messages').upsert(msgs), supabase.from('unigo_learning_sessions').upsert(sess)])) if (r.error) throw r.error
 }
 
 export async function logOut() {
@@ -269,7 +269,7 @@ export async function changePassword(oldPw, newPw) {
 
 export async function deleteAccount() {
   if (currentUser()?.isDemo) throw new Error("The shared demo account can't be deleted.")
-  const { error } = await supabase.rpc('delete_my_account')
+  const { error } = await supabase.rpc('unigo_delete_my_account')
   if (error) throw friendly(error)
   await logOut()
 }
@@ -286,7 +286,7 @@ function saveProfile() {
     profileTimer = null
     pending--
     const me = state.users[authId]
-    if (me) remote(() => supabase.from('profiles').update({ data: strip(me), updated_at: new Date().toISOString() }).eq('id', authId))
+    if (me) remote(() => supabase.from('unigo_profiles').update({ data: strip(me), updated_at: new Date().toISOString() }).eq('id', authId))
   }, 600)
 }
 
@@ -390,9 +390,9 @@ export function swipe(toId, action) {
   }
   emit()
   remote(async () => {
-    const r = await supabase.from('swipes').upsert(rows)
+    const r = await supabase.from('unigo_swipes').upsert(rows)
     if (r.error || !match) return r
-    return supabase.from('matches').insert(matchRow(match))
+    return supabase.from('unigo_matches').insert(matchRow(match))
   })
   return match
 }
@@ -401,14 +401,14 @@ export function undoSwipe(toId) {
   const id = currentUserId()
   state.swipes = state.swipes.filter((s) => !(s.from === id && s.to === toId))
   emit()
-  remote(() => supabase.from('swipes').delete().eq('from_id', id).eq('to_id', toId))
+  remote(() => supabase.from('unigo_swipes').delete().eq('from_id', id).eq('to_id', toId))
 }
 
 export function clearPasses() {
   const id = currentUserId()
   state.swipes = state.swipes.filter((s) => !(s.from === id && s.action === 'pass'))
   emit()
-  remote(() => supabase.from('swipes').delete().eq('from_id', id).eq('action', 'pass'))
+  remote(() => supabase.from('unigo_swipes').delete().eq('from_id', id).eq('action', 'pass'))
 }
 
 export function unmatch(matchId) {
@@ -424,8 +424,8 @@ export function unmatch(matchId) {
   state.swipes.push(pass)
   emit()
   remote(async () => {
-    const r = await supabase.from('matches').delete().eq('id', matchId)
-    return r.error ? r : supabase.from('swipes').upsert(swipeRow(pass))
+    const r = await supabase.from('unigo_matches').delete().eq('id', matchId)
+    return r.error ? r : supabase.from('unigo_swipes').upsert(swipeRow(pass))
   })
 }
 
@@ -435,7 +435,7 @@ export const getMatch = (matchId) => state.matches.find((m) => m.id === matchId)
 
 function pushMessage(matchId, msg) {
   ;(state.messages[matchId] ||= []).push(msg)
-  remote(() => supabase.from('messages').insert(messageRow(matchId, msg)))
+  remote(() => supabase.from('unigo_messages').insert(messageRow(matchId, msg)))
 }
 
 export function sendMessage(matchId, text, extra = {}) {
@@ -510,12 +510,12 @@ export function proposeSession(matchId, data) {
   const s = { id: uid('s'), matchId, proposer: me, partner, status: 'proposed', at: Date.now(), ...data }
   state.sessions.push(s)
   remote(async () => {
-    const r = await supabase.from('learning_sessions').insert(sessionRow(s))
+    const r = await supabase.from('unigo_learning_sessions').insert(sessionRow(s))
     if (r.error) return r
     const msg = { id: uid('msg'), from: me, text: '', at: Date.now(), type: 'session', sessionId: s.id }
     ;(state.messages[matchId] ||= []).push(msg)
     emit()
-    return supabase.from('messages').insert(messageRow(matchId, msg))
+    return supabase.from('unigo_messages').insert(messageRow(matchId, msg))
   })
   emit()
   const other = state.users[partner]
@@ -536,7 +536,7 @@ export function setSessionStatus(id, status) {
   if (!s) return
   s.status = status
   emit()
-  remote(() => supabase.from('learning_sessions').update({ data: sessionRow(s).data }).eq('id', id))
+  remote(() => supabase.from('unigo_learning_sessions').update({ data: sessionRow(s).data }).eq('id', id))
 }
 
 export function learningProgress(userId = currentUserId()) {
