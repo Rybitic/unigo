@@ -1,5 +1,9 @@
 // UniGO data layer, backed by Supabase (Auth + Postgres).
 //
+// The Supabase project may be shared with another app, so UniGO only ever
+// signs users up, in and out — it never edits or deletes a login — and only
+// touches its own unigo_ tables.
+//
 // Pages read from an in-memory copy of the signed-in user's data, so the UI
 // stays synchronous and instant. Every change is applied locally first and
 // then written to the database; a light poll keeps the copy in sync with
@@ -259,16 +263,6 @@ export async function logOut() {
   } catch {}
   leaveSession()
   if (!wasDemo) await supabase?.auth.signOut()
-}
-
-export async function changePassword(oldPw, newPw) {
-  const me = currentUser()
-  if (me.isDemo) throw new Error("The shared demo account's password can't be changed.")
-  if (newPw.length < 6) throw new Error('New password must be at least 6 characters.')
-  const check = await supabase.auth.signInWithPassword({ email: me.email, password: oldPw })
-  if (check.error) throw new Error('Current password is incorrect.')
-  const { error } = await supabase.auth.updateUser({ password: newPw })
-  if (error) throw friendly(error)
 }
 
 export async function deleteAccount() {

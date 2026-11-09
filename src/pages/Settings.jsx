@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { Bell, Compass, Lock, Shield, Database, LogOut, Trash2, RotateCcw, HardDrive, Cloud } from 'lucide-react'
 import { AppShell } from '../components/AppShell'
 import { Toggle, Modal, useToast } from '../components/ui'
-import { getSettings, updateSettings, changePassword, logOut, deleteAccount, currentUser, useDB, isLocalDemo } from '../lib/db'
+import { getSettings, updateSettings, logOut, deleteAccount, currentUser, useDB, isLocalDemo } from '../lib/db'
 import { navigate } from '../lib/router'
 
 function Section({ icon: Icon, title, desc, children }) {
@@ -37,22 +37,8 @@ export function Settings() {
   const me = currentUser()
   const s = getSettings()
   const toast = useToast()
-  const [pw, setPw] = useState({ old: '', next: '' })
-  const [pwErr, setPwErr] = useState('')
   const [confirm, setConfirm] = useState(null)
   const t = (k) => (v) => (updateSettings({ [k]: v }), toast('Setting saved'))
-
-  const submitPw = async (e) => {
-    e.preventDefault()
-    setPwErr('')
-    try {
-      await changePassword(pw.old, pw.next)
-      setPw({ old: '', next: '' })
-      toast('Password updated')
-    } catch (err) {
-      setPwErr(err.message)
-    }
-  }
 
   return (
     <AppShell page="settings" title="Settings">
@@ -83,12 +69,9 @@ export function Settings() {
 
         <div className="col" style={{ gap: 20 }}>
           <Section icon={Lock} title="Account" desc={me.email}>
-            <form onSubmit={submitPw} className="col" style={{ gap: 12, marginTop: 14 }}>
-              {pwErr && <div className="form-error">{pwErr}</div>}
-              <div className="field"><label className="label">Current password</label><input type="password" className="input" value={pw.old} onChange={(e) => setPw({ ...pw, old: e.target.value })} autoComplete="current-password" /></div>
-              <div className="field"><label className="label">New password</label><input type="password" className="input" value={pw.next} onChange={(e) => setPw({ ...pw, next: e.target.value })} autoComplete="new-password" /></div>
-              <button className="btn btn-secondary" disabled={!pw.old || !pw.next} style={{ alignSelf: 'flex-start' }}>Update password</button>
-            </form>
+            <Row title="Email" desc="You log in with this email and your password">
+              <span className="small" style={{ fontWeight: 600 }}>{me.email}</span>
+            </Row>
           </Section>
 
           <Section icon={Shield} title="Safety & privacy">
