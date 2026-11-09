@@ -66,7 +66,7 @@ export function Onboarding() {
         <div className="ob-steps">
           {STEPS.map((s, i) => <span key={s} className={i <= step ? 'on' : ''} title={s} />)}
         </div>
-        <button className="btn btn-ghost btn-sm" onClick={() => (logOut(), navigate('/'))}>Exit</button>
+        <button className="btn btn-ghost btn-sm" onClick={async () => (await logOut(), navigate('/'))}>Exit</button>
       </div>
 
       <div className="card ob-card" key={step} style={{ animation: 'pageIn .4s var(--ease)' }}>

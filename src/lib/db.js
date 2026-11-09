@@ -1,102 +1,165 @@
-// UniGO data layer — localStorage "demo mode" backend.
+// UniGO data layer, backed by Supabase (Auth + Postgres).
 //
-// The API is deliberately backend-shaped (users, swipes, matches, messages,
-// sessions) so it maps 1:1 onto the tables in supabase/schema.sql.
-// The signed-in user lives in sessionStorage (per tab) so two tabs can be two
-// different accounts chatting in real time via the `storage` event.
+// Pages read from an in-memory copy of the signed-in user's data, so the UI
+// stays synchronous and instant. Every change is applied locally first and
+// then written to the database; a light poll keeps the copy in sync with
+// changes made by other people (likes, matches, messages) and other devices.
+// The demo community members (seed.js) live in the code and act on the
+// client, but everything they do with you is stored in the database too.
 
 import { useSyncExternalStore } from 'react'
+import { createClient } from '@supabase/supabase-js'
 import { SEED_USERS, seedActivity, DEMO_EMAIL, DEMO_PASSWORD } from './seed'
 import { computeMatch } from './matching'
 import { botReply, botSessionResponse } from './bots'
+import { SUPABASE_URL, SUPABASE_ANON_KEY } from './config'
 
-const KEY = 'unigo:db:v1'
-const SESSION_KEY = 'unigo:session'
+export const isConfigured = !!(SUPABASE_URL && SUPABASE_ANON_KEY)
+const supabase = isConfigured ? createClient(SUPABASE_URL, SUPABASE_ANON_KEY) : null
 
-let state = null
+const BOTS = Object.fromEntries(
+  SEED_USERS.filter((u) => !u.isDemo).map(({ likes, ...u }) => [
+    u.id,
+    { ...u, email: `${u.id.slice(2)}@unigo.app`, onboarded: true, createdAt: Date.now() - 30 * 864e5, isBot: true, botLikes: likes || [] },
+  ]),
+)
+
+let authId = null
+let state = blank()
 let version = 0
+let pending = 0
+let pollTimer = null
 const listeners = new Set()
 
-const uid = (p) => `${p}_${Math.random().toString(36).slice(2, 10)}${Date.now().toString(36).slice(-3)}`
-
-async function hash(password, salt) {
-  const data = new TextEncoder().encode(`${salt}:${password}`)
-  const buf = await crypto.subtle.digest('SHA-256', data)
-  return [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, '0')).join('')
-}
-
 function blank() {
-  return { users: {}, credentials: {}, swipes: [], matches: [], messages: {}, sessions: [], reads: {}, settings: {} }
+  return { users: { ...BOTS }, swipes: [], matches: [], messages: {}, sessions: [] }
 }
 
-async function seed() {
-  const s = blank()
-  for (const u of SEED_USERS) {
-    const { likes, ...profile } = u
-    s.users[u.id] = { ...profile, email: u.email || `${u.id.slice(2)}@unigo.app`, onboarded: true, createdAt: Date.now() - 30 * 864e5, isBot: !u.isDemo, botLikes: likes || [] }
-  }
-  const salt = 'demo'
-  s.credentials[DEMO_EMAIL] = { userId: 'u_priya', salt, hash: await hash(DEMO_PASSWORD, salt) }
-  Object.assign(s, seedActivity())
-  return s
-}
-
-function load() {
-  try {
-    const raw = localStorage.getItem(KEY)
-    return raw ? JSON.parse(raw) : null
-  } catch {
-    return null
-  }
-}
-
-function persist() {
-  try {
-    localStorage.setItem(KEY, JSON.stringify(state))
-  } catch (e) {
-    console.warn('UniGO: could not persist', e)
-  }
-}
-
-function commit() {
-  persist()
-  emit()
-}
+const uid = (p) => `${p}_${Math.random().toString(36).slice(2, 10)}${Date.now().toString(36).slice(-4)}`
 
 function emit() {
   version++
   listeners.forEach((l) => l())
 }
 
-export async function initDB() {
-  state = load()
-  if (!state) {
-    state = await seed()
-    persist()
-  }
-  // Ask the browser not to evict saved accounts under storage pressure.
-  navigator.storage?.persist?.().catch(() => {})
-  window.addEventListener('storage', (e) => {
-    if (e.key === KEY && e.newValue) {
-      state = JSON.parse(e.newValue)
-      emit()
-    }
-  })
+function reportError(err) {
+  console.error('UniGO:', err)
+  window.dispatchEvent(new CustomEvent('unigo:error', { detail: err?.message || String(err) }))
 }
 
-// Restores the sample community but keeps every registered account and profile.
-export async function resetDemo() {
-  const accounts = Object.entries(state.credentials)
-    .filter(([, c]) => c.userId !== 'u_priya' && state.users[c.userId])
-    .map(([email, cred]) => ({ email, cred, user: state.users[cred.userId] }))
-  state = await seed()
-  for (const { email, cred, user } of accounts) {
-    state.credentials[email] = cred
-    state.users[cred.userId] = user
+// Run a database write without blocking the UI. Polling pauses while writes
+// are in flight so it never overwrites a change that hasn't landed yet.
+function remote(fn) {
+  pending++
+  return Promise.resolve()
+    .then(fn)
+    .then((res) => {
+      if (res?.error) throw res.error
+      return res
+    })
+    .catch((err) => {
+      reportError(err)
+      refresh(true)
+    })
+    .finally(() => pending--)
+}
+
+// ---------- Row mapping ----------
+const toSwipe = (r) => ({ from: r.from_id, to: r.to_id, action: r.action, at: Number(r.at) })
+const toMatch = (r) => ({ id: r.id, users: [r.user_a, r.user_b], at: Number(r.at) })
+const toMessage = (r) => ({ id: r.id, from: r.from_id, text: r.body || '', at: Number(r.at), ...(r.type ? { type: r.type, sessionId: r.session_id } : {}) })
+const toSession = (r) => ({ ...r.data, id: r.id, matchId: r.match_id })
+const toProfile = (r) => ({ ...r.data, id: r.id, email: r.email })
+
+const swipeRow = (s) => ({ from_id: s.from, to_id: s.to, action: s.action, at: s.at })
+const matchRow = (m) => ({ id: m.id, user_a: m.users[0], user_b: m.users[1], at: m.at })
+const messageRow = (matchId, m) => ({ id: m.id, match_id: matchId, from_id: m.from, body: m.text, type: m.type || null, session_id: m.sessionId || null, at: m.at })
+const sessionRow = ({ id, matchId, ...data }) => ({ id, match_id: matchId, data, at: data.at })
+
+// ---------- Loading & sync ----------
+let tick = 0
+async function refresh(withProfiles = false) {
+  if (!authId || pending) return
+  const me = authId
+  const q = [supabase.from('swipes').select('*'), supabase.from('matches').select('*')]
+  if (withProfiles) q.push(supabase.from('profiles').select('id,email,data'))
+  const [sw, ma, pr] = await Promise.all(q)
+  const err = sw.error || ma.error || pr?.error
+  if (err) return reportError(err)
+  const matches = ma.data.map(toMatch)
+  const ids = matches.map((m) => m.id)
+  let msgs = { data: [] }
+  let sess = { data: [] }
+  if (ids.length) {
+    ;[msgs, sess] = await Promise.all([
+      supabase.from('messages').select('*').in('match_id', ids).order('at'),
+      supabase.from('learning_sessions').select('*').in('match_id', ids),
+    ])
+    if (msgs.error || sess.error) return reportError(msgs.error || sess.error)
   }
-  sessionStorage.removeItem(SESSION_KEY)
-  localStorage.removeItem(SESSION_KEY)
-  commit()
+  // Discard if the user signed out, or made a change while we were fetching.
+  if (authId !== me || pending) return
+
+  const messages = {}
+  for (const id of ids) messages[id] = []
+  for (const r of msgs.data) (messages[r.match_id] ||= []).push(toMessage(r))
+  // Keep any local-only typing/bot messages ordering stable.
+  for (const id of ids) messages[id].sort((a, b) => a.at - b.at)
+
+  const users = withProfiles ? { ...BOTS, ...Object.fromEntries(pr.data.map((r) => [r.id, toProfile(r)])) } : state.users
+  state = { users, swipes: sw.data.map(toSwipe), matches, messages, sessions: sess.data.map(toSession) }
+  emit()
+}
+
+function startPolling() {
+  stopPolling()
+  pollTimer = setInterval(() => {
+    if (document.hidden) return
+    tick++
+    refresh(tick % 5 === 0)
+  }, 4000)
+}
+function stopPolling() {
+  clearInterval(pollTimer)
+  pollTimer = null
+}
+
+async function enterSession(user) {
+  authId = user.id
+  await refresh(true)
+  if (!state.users[authId]) {
+    // First sign-in for this account: create its profile.
+    const profile = newProfile(user.email, user.user_metadata?.name || user.email.split('@')[0])
+    state.users[authId] = profile
+    const { error } = await supabase.from('profiles').insert({ id: authId, email: user.email, data: strip(profile) })
+    if (error && error.code !== '23505') throw error
+    await refresh(true)
+  }
+  startPolling()
+  emit()
+}
+
+function leaveSession() {
+  authId = null
+  stopPolling()
+  state = blank()
+  emit()
+}
+
+export async function initDB() {
+  if (!supabase) return
+  const { data } = await supabase.auth.getSession()
+  if (data.session) {
+    try {
+      await enterSession(data.session.user)
+    } catch (err) {
+      reportError(err)
+    }
+  }
+  supabase.auth.onAuthStateChange((event) => {
+    if (event === 'SIGNED_OUT') leaveSession()
+  })
+  document.addEventListener('visibilitychange', () => !document.hidden && refresh(true))
 }
 
 // ---------- React binding ----------
@@ -104,93 +167,133 @@ const subscribe = (l) => (listeners.add(l), () => listeners.delete(l))
 export const useDB = () => useSyncExternalStore(subscribe, () => version)
 
 // ---------- Auth ----------
-export function currentUserId() {
-  const id = sessionStorage.getItem(SESSION_KEY) || localStorage.getItem(SESSION_KEY)
-  return id && state.users[id] ? id : null
-}
+export const currentUserId = () => (authId && state.users[authId] ? authId : null)
 export const currentUser = () => state.users[currentUserId()] || null
 
-function setSession(id) {
-  state.users[id].lastLoginAt = Date.now()
-  persist()
-  sessionStorage.setItem(SESSION_KEY, id)
-  localStorage.setItem(SESSION_KEY, id)
-  emit()
+function newProfile(email, name) {
+  return {
+    id: authId, email, name: name.trim(), avatar: '', bio: '', headline: '', university: '',
+    location: { city: '', country: '' }, teach: [], learn: [], interests: [], format: 'both',
+    availability: { days: [], times: [] }, onboarded: false, createdAt: Date.now(), settings: {}, reads: {},
+  }
+}
+
+const strip = ({ id, email, ...data }) => data
+
+function friendly(err) {
+  const m = err?.message || ''
+  if (/invalid login credentials/i.test(m)) return new Error('Incorrect email or password.')
+  if (/already registered|already exists/i.test(m)) return new Error('An account with this email already exists. Try logging in.')
+  if (/email not confirmed/i.test(m)) return new Error('Please confirm your email address first — check your inbox.')
+  if (/password/i.test(m) && /6/.test(m)) return new Error('Password must be at least 6 characters.')
+  if (/failed to fetch|network/i.test(m)) return new Error("Can't reach the server. Check your internet connection and try again.")
+  return new Error(m || 'Something went wrong. Please try again.')
+}
+
+function requireBackend() {
+  if (!supabase) throw new Error('The database is not connected yet.')
 }
 
 export async function signUp({ name, email, password }) {
+  requireBackend()
   email = email.trim().toLowerCase()
-  if (state.credentials[email]) throw new Error('An account with this email already exists. Try logging in.')
   if (password.length < 6) throw new Error('Password must be at least 6 characters.')
-  const id = uid('u')
-  const salt = Math.random().toString(36).slice(2)
-  state.credentials[email] = { userId: id, salt, hash: await hash(password, salt) }
-  state.users[id] = {
-    id, email, name: name.trim(), avatar: '', bio: '', headline: '', university: '',
-    location: { city: '', country: '' }, teach: [], learn: [], interests: [], format: 'both',
-    availability: { days: [], times: [] }, onboarded: false, createdAt: Date.now(),
-  }
-  persist()
-  setSession(id)
-  return state.users[id]
+  const { data, error } = await supabase.auth.signUp({ email, password, options: { data: { name: name.trim() } } })
+  if (error) throw friendly(error)
+  // With email confirmation on, Supabase returns a user with no identities for an existing email.
+  if (data.user && !data.user.identities?.length) throw new Error('An account with this email already exists. Try logging in.')
+  if (!data.session) throw new Error('Account created! Check your email to confirm it, then log in.')
+  await enterSession(data.user)
+  return currentUser()
 }
 
 export async function logIn({ email, password }) {
-  email = email.trim().toLowerCase()
-  const cred = state.credentials[email]
-  if (!cred) throw new Error('No account with this email on this device. Accounts are saved in the browser you signed up in.')
-  if ((await hash(password, cred.salt)) !== cred.hash) throw new Error('Incorrect password. Please try again.')
-  setSession(cred.userId)
-  return state.users[cred.userId]
+  requireBackend()
+  const { data, error } = await supabase.auth.signInWithPassword({ email: email.trim().toLowerCase(), password })
+  if (error) throw friendly(error)
+  await enterSession(data.user)
+  return currentUser()
 }
 
-// Accounts registered in this browser, most recently used first.
-export function savedAccounts() {
-  return Object.values(state.credentials)
-    .map((c) => state.users[c.userId])
-    .filter((u) => u && !u.isDemo)
-    .sort((a, b) => (b.lastLoginAt || b.createdAt) - (a.lastLoginAt || a.createdAt))
+// The shared demo account. Created (with its lived-in history) the first time anyone uses it.
+export async function logInDemo() {
+  requireBackend()
+  let { data, error } = await supabase.auth.signInWithPassword({ email: DEMO_EMAIL, password: DEMO_PASSWORD })
+  if (error && /invalid login credentials/i.test(error.message)) {
+    ;({ data, error } = await supabase.auth.signUp({ email: DEMO_EMAIL, password: DEMO_PASSWORD, options: { data: { name: 'Priya Sharma' } } }))
+    if (!error && !data.session) throw new Error('Demo account needs email confirmation turned off in Supabase.')
+  }
+  if (error) throw friendly(error)
+  authId = data.user.id
+  await refresh(true)
+  if (!state.users[authId]?.isDemo) await seedDemo(data.user)
+  await enterSession(data.user)
+  return currentUser()
 }
 
-export const logInDemo = () => logIn({ email: DEMO_EMAIL, password: DEMO_PASSWORD })
+async function seedDemo(user) {
+  const me = user.id
+  const p = `${me.slice(0, 8)}_`
+  const mapId = (x) => (x === 'u_priya' ? me : x)
+  const { likes, ...priya } = SEED_USERS.find((u) => u.isDemo)
+  const act = seedActivity()
+  const profile = { ...priya, id: me, email: user.email, onboarded: true, createdAt: Date.now(), settings: {}, reads: Object.fromEntries(Object.entries(act.reads.u_priya || {}).map(([k, v]) => [p + k, v])) }
+  const ops = [
+    supabase.from('profiles').upsert({ id: me, email: user.email, data: strip(profile) }),
+    supabase.from('swipes').upsert(act.swipes.map((s) => swipeRow({ ...s, from: mapId(s.from), to: mapId(s.to) }))),
+  ]
+  for (const r of await Promise.all(ops)) if (r.error) throw r.error
+  const m = await supabase.from('matches').upsert(act.matches.map((x) => matchRow({ ...x, id: p + x.id, users: x.users.map(mapId) })))
+  if (m.error) throw m.error
+  const msgs = Object.entries(act.messages).flatMap(([mid, list]) =>
+    list.map((x) => messageRow(p + mid, { ...x, id: p + x.id, from: mapId(x.from), sessionId: x.sessionId && p + x.sessionId })),
+  )
+  const sess = act.sessions.map((s) => sessionRow({ ...s, id: p + s.id, matchId: p + s.matchId, proposer: mapId(s.proposer), partner: mapId(s.partner), teacher: mapId(s.teacher), learner: mapId(s.learner) }))
+  for (const r of await Promise.all([supabase.from('messages').upsert(msgs), supabase.from('learning_sessions').upsert(sess)])) if (r.error) throw r.error
+}
 
-export function logOut() {
-  sessionStorage.removeItem(SESSION_KEY)
-  localStorage.removeItem(SESSION_KEY)
-  emit()
+export async function logOut() {
+  leaveSession()
+  await supabase?.auth.signOut()
 }
 
 export async function changePassword(oldPw, newPw) {
   const me = currentUser()
-  const cred = state.credentials[me.email]
-  if ((await hash(oldPw, cred.salt)) !== cred.hash) throw new Error('Current password is incorrect.')
+  if (me.isDemo) throw new Error("The shared demo account's password can't be changed.")
   if (newPw.length < 6) throw new Error('New password must be at least 6 characters.')
-  cred.hash = await hash(newPw, cred.salt)
-  commit()
+  const check = await supabase.auth.signInWithPassword({ email: me.email, password: oldPw })
+  if (check.error) throw new Error('Current password is incorrect.')
+  const { error } = await supabase.auth.updateUser({ password: newPw })
+  if (error) throw friendly(error)
 }
 
-export function deleteAccount() {
-  const id = currentUserId()
-  const me = state.users[id]
-  delete state.credentials[me.email]
-  delete state.users[id]
-  const gone = state.matches.filter((m) => m.users.includes(id)).map((m) => m.id)
-  state.matches = state.matches.filter((m) => !gone.includes(m.id))
-  gone.forEach((m) => delete state.messages[m])
-  state.swipes = state.swipes.filter((s) => s.from !== id && s.to !== id)
-  state.sessions = state.sessions.filter((s) => !gone.includes(s.matchId))
-  logOut()
-  commit()
+export async function deleteAccount() {
+  if (currentUser()?.isDemo) throw new Error("The shared demo account can't be deleted.")
+  const { error } = await supabase.rpc('delete_my_account')
+  if (error) throw friendly(error)
+  await logOut()
 }
 
 // ---------- Profiles ----------
 export const getUser = (id) => state.users[id]
 export const allUsers = () => Object.values(state.users)
 
+let profileTimer = null
+function saveProfile() {
+  if (profileTimer) clearTimeout(profileTimer)
+  else pending++
+  profileTimer = setTimeout(() => {
+    profileTimer = null
+    pending--
+    const me = state.users[authId]
+    if (me) remote(() => supabase.from('profiles').update({ data: strip(me), updated_at: new Date().toISOString() }).eq('id', authId))
+  }, 600)
+}
+
 export function updateProfile(patch) {
-  const id = currentUserId()
-  state.users[id] = { ...state.users[id], ...patch }
-  commit()
+  state.users[authId] = { ...state.users[authId], ...patch }
+  emit()
+  saveProfile()
 }
 
 export function profileCompletion(u) {
@@ -229,10 +332,10 @@ function lastActivity(m) {
   return msgs.length ? msgs[msgs.length - 1].at : m.at
 }
 
-// Would this bot like the user back? Explicit seeded likes, or a genuine
-// compatibility check from the bot's own perspective.
+// Would this demo member like the user back? Explicit seeded likes for the
+// demo account, or a genuine compatibility check from the bot's perspective.
 function botLikes(bot, me) {
-  if (bot.botLikes?.includes(me.id)) return true
+  if (me.isDemo && bot.botLikes?.includes('u_priya')) return true
   const m = computeMatch(bot, me)
   return m.score >= 55 || (m.reciprocal && m.score >= 45)
 }
@@ -240,17 +343,17 @@ function botLikes(bot, me) {
 export function discoverQueue() {
   const me = currentUser()
   const swiped = new Set(state.swipes.filter((s) => s.from === me.id).map((s) => s.to))
-  return allUsers().filter((u) => u.id !== me.id && u.onboarded && state.settings[u.id]?.discoverable !== false && !swiped.has(u.id) && !matchBetween(me.id, u.id))
+  return allUsers().filter((u) => u.id !== me.id && u.onboarded && u.settings?.discoverable !== false && !swiped.has(u.id) && !matchBetween(me.id, u.id))
 }
 
-// Profiles that liked me and I haven't answered (bots "like" lazily based on compatibility).
+// Profiles that liked me and I haven't answered.
 export function incomingLikes() {
   const me = currentUser()
   if (!me) return []
   return allUsers().filter((u) => {
     if (u.id === me.id || !u.onboarded || matchBetween(me.id, u.id) || swipeOf(me.id, u.id)) return false
     if (swipeOf(u.id, me.id)?.action === 'like') return true
-    return u.isBot && u.botLikes?.includes(me.id)
+    return u.isBot && me.isDemo && u.botLikes?.includes('u_priya')
   })
 }
 
@@ -265,34 +368,47 @@ export function sentLikes() {
 /** Returns the new match if this swipe created one. */
 export function swipe(toId, action) {
   const me = currentUser()
+  const mine = { from: me.id, to: toId, action, at: Date.now() }
   state.swipes = state.swipes.filter((s) => !(s.from === me.id && s.to === toId))
-  state.swipes.push({ from: me.id, to: toId, action, at: Date.now() })
+  state.swipes.push(mine)
+  const rows = [swipeRow(mine)]
   let match = null
   if (action === 'like') {
     const other = state.users[toId]
     const theyLike = swipeOf(toId, me.id)?.action === 'like' || (other.isBot && botLikes(other, me))
     if (theyLike && !matchBetween(me.id, toId)) {
-      if (other.isBot && !swipeOf(toId, me.id)) state.swipes.push({ from: toId, to: me.id, action: 'like', at: Date.now() })
+      if (other.isBot && !swipeOf(toId, me.id)) {
+        const back = { from: toId, to: me.id, action: 'like', at: Date.now() }
+        state.swipes.push(back)
+        rows.push(swipeRow(back))
+      }
       match = { id: uid('m'), users: [me.id, toId], at: Date.now() }
       state.matches.push(match)
       state.messages[match.id] = []
       if (other.isBot) scheduleBot(match.id, toId, 'opener', 4000)
     }
   }
-  commit()
+  emit()
+  remote(async () => {
+    const r = await supabase.from('swipes').upsert(rows)
+    if (r.error || !match) return r
+    return supabase.from('matches').insert(matchRow(match))
+  })
   return match
 }
 
 export function undoSwipe(toId) {
   const id = currentUserId()
   state.swipes = state.swipes.filter((s) => !(s.from === id && s.to === toId))
-  commit()
+  emit()
+  remote(() => supabase.from('swipes').delete().eq('from_id', id).eq('to_id', toId))
 }
 
 export function clearPasses() {
   const id = currentUserId()
   state.swipes = state.swipes.filter((s) => !(s.from === id && s.action === 'pass'))
-  commit()
+  emit()
+  remote(() => supabase.from('swipes').delete().eq('from_id', id).eq('action', 'pass'))
 }
 
 export function unmatch(matchId) {
@@ -303,36 +419,49 @@ export function unmatch(matchId) {
   state.matches = state.matches.filter((x) => x.id !== matchId)
   delete state.messages[matchId]
   state.sessions = state.sessions.filter((s) => s.matchId !== matchId)
+  const pass = { from: id, to: other, action: 'pass', at: Date.now() }
   state.swipes = state.swipes.filter((s) => !(s.from === id && s.to === other))
-  state.swipes.push({ from: id, to: other, action: 'pass', at: Date.now() })
-  commit()
+  state.swipes.push(pass)
+  emit()
+  remote(async () => {
+    const r = await supabase.from('matches').delete().eq('id', matchId)
+    return r.error ? r : supabase.from('swipes').upsert(swipeRow(pass))
+  })
 }
 
 // ---------- Messages ----------
 export const messagesFor = (matchId) => state.messages[matchId] || []
 export const getMatch = (matchId) => state.matches.find((m) => m.id === matchId)
 
+function pushMessage(matchId, msg) {
+  ;(state.messages[matchId] ||= []).push(msg)
+  remote(() => supabase.from('messages').insert(messageRow(matchId, msg)))
+}
+
 export function sendMessage(matchId, text, extra = {}) {
   const me = currentUserId()
   const msg = { id: uid('msg'), from: me, text, at: Date.now(), ...extra }
-  ;(state.messages[matchId] ||= []).push(msg)
-  markRead(matchId, false)
-  commit()
+  pushMessage(matchId, msg)
+  markRead(matchId)
   const other = state.users[getMatch(matchId).users.find((u) => u !== me)]
   if (other?.isBot && !extra.type) scheduleBot(matchId, other.id, 'reply', 1800 + Math.random() * 2200)
   return msg
 }
 
-export function markRead(matchId, save = true) {
-  const me = currentUserId()
-  ;(state.reads[me] ||= {})[matchId] = Date.now()
-  if (save) commit()
+export function markRead(matchId) {
+  const me = state.users[authId]
+  if (!me) return
+  const last = messagesFor(matchId).slice(-1)[0]
+  if (last && (me.reads?.[matchId] || 0) >= last.at) return
+  me.reads = { ...(me.reads || {}), [matchId]: Date.now() }
+  emit()
+  saveProfile()
 }
 
 export function unreadCount(matchId) {
-  const me = currentUserId()
-  const seen = state.reads[me]?.[matchId] || 0
-  return messagesFor(matchId).filter((m) => m.from !== me && m.at > seen).length
+  const me = currentUser()
+  const seen = me?.reads?.[matchId] || 0
+  return messagesFor(matchId).filter((m) => m.from !== me?.id && m.at > seen).length
 }
 
 export const totalUnread = () => myMatches().reduce((n, m) => n + unreadCount(m.id), 0)
@@ -355,9 +484,8 @@ function scheduleBot(matchId, botId, kind, delay) {
       if (!m) return emit()
       const bot = state.users[botId]
       const human = state.users[m.users.find((u) => u !== botId)]
-      const text = botReply(bot, human, messagesFor(matchId), kind)
-      ;(state.messages[matchId] ||= []).push({ id: uid('msg'), from: botId, text, at: Date.now() })
-      commit()
+      pushMessage(matchId, { id: uid('msg'), from: botId, text: botReply(bot, human, messagesFor(matchId), kind), at: Date.now() })
+      emit()
     }, kind === 'opener' ? 2600 : 1800)
   }, delay)
 }
@@ -381,15 +509,23 @@ export function proposeSession(matchId, data) {
   const partner = m.users.find((u) => u !== me)
   const s = { id: uid('s'), matchId, proposer: me, partner, status: 'proposed', at: Date.now(), ...data }
   state.sessions.push(s)
-  sendMessage(matchId, '', { type: 'session', sessionId: s.id })
+  remote(async () => {
+    const r = await supabase.from('learning_sessions').insert(sessionRow(s))
+    if (r.error) return r
+    const msg = { id: uid('msg'), from: me, text: '', at: Date.now(), type: 'session', sessionId: s.id }
+    ;(state.messages[matchId] ||= []).push(msg)
+    emit()
+    return supabase.from('messages').insert(messageRow(matchId, msg))
+  })
+  emit()
   const other = state.users[partner]
   if (other?.isBot) {
     setTimeout(() => {
       const live = getSession(s.id)
       if (!live || live.status !== 'proposed') return
-      live.status = 'confirmed'
-      ;(state.messages[matchId] ||= []).push({ id: uid('msg'), from: partner, text: botSessionResponse(other, live), at: Date.now() })
-      commit()
+      setSessionStatus(s.id, 'confirmed')
+      pushMessage(matchId, { id: uid('msg'), from: partner, text: botSessionResponse(other, live), at: Date.now() })
+      emit()
     }, 3500)
   }
   return s
@@ -399,7 +535,8 @@ export function setSessionStatus(id, status) {
   const s = getSession(id)
   if (!s) return
   s.status = status
-  commit()
+  emit()
+  remote(() => supabase.from('learning_sessions').update({ data: sessionRow(s).data }).eq('id', id))
 }
 
 export function learningProgress(userId = currentUserId()) {
@@ -419,12 +556,9 @@ export function learningProgress(userId = currentUserId()) {
   }
 }
 
-// ---------- Settings ----------
-const DEFAULT_SETTINGS = { reciprocalFirst: true, showInPerson: true, showOnline: true, emailNotifs: true, matchNotifs: true, messageNotifs: true, showLocation: true, discoverable: true }
-export const getSettings = () => ({ ...DEFAULT_SETTINGS, ...(state.settings[currentUserId()] || {}) })
+// ---------- Settings (stored on the profile) ----------
+const DEFAULT_SETTINGS = { reciprocalFirst: true, emailNotifs: true, matchNotifs: true, messageNotifs: true, discoverable: true }
+export const getSettings = () => ({ ...DEFAULT_SETTINGS, ...(currentUser()?.settings || {}) })
 export function updateSettings(patch) {
-  state.settings[currentUserId()] = { ...getSettings(), ...patch }
-  commit()
+  updateProfile({ settings: { ...getSettings(), ...patch } })
 }
-
-export const isReady = () => !!state

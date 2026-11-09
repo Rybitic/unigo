@@ -1,20 +1,9 @@
 import { useState } from 'react'
-import { ArrowLeftRight, Mail, Lock, User, ArrowRight, Eye, EyeOff, Sparkles, Info } from 'lucide-react'
+import { ArrowLeftRight, Mail, Lock, User, ArrowRight, Eye, EyeOff, Sparkles } from 'lucide-react'
 import { Avatar, Logo, useToast } from '../components/ui'
-import { getUser, logIn, logInDemo, signUp, savedAccounts } from '../lib/db'
+import { getUser, logIn, logInDemo, signUp } from '../lib/db'
 import { navigate } from '../lib/router'
 import { DEMO_EMAIL, DEMO_PASSWORD } from '../lib/seed'
-
-function GoogleIcon() {
-  return (
-    <svg width="18" height="18" viewBox="0 0 48 48">
-      <path fill="#FFC107" d="M43.6 20.5H42V20H24v8h11.3C33.7 32.7 29.2 36 24 36c-6.6 0-12-5.4-12-12s5.4-12 12-12c3.1 0 5.8 1.2 7.9 3.1l5.7-5.7C34 6.1 29.3 4 24 4 12.9 4 4 12.9 4 24s8.9 20 20 20 20-8.9 20-20c0-1.3-.1-2.4-.4-3.5z" />
-      <path fill="#FF3D00" d="M6.3 14.7l6.6 4.8C14.7 15.1 19 12 24 12c3.1 0 5.8 1.2 7.9 3.1l5.7-5.7C34 6.1 29.3 4 24 4 16.3 4 9.7 8.3 6.3 14.7z" />
-      <path fill="#4CAF50" d="M24 44c5.2 0 9.9-2 13.4-5.2l-6.2-5.2C29.2 35.1 26.7 36 24 36c-5.2 0-9.6-3.3-11.3-7.9l-6.5 5C9.5 39.6 16.2 44 24 44z" />
-      <path fill="#1976D2" d="M43.6 20.5H42V20H24v8h11.3c-.8 2.2-2.2 4.2-4.1 5.6l6.2 5.2C37 39.2 44 34 44 24c0-1.3-.1-2.4-.4-3.5z" />
-    </svg>
-  )
-}
 
 export function Auth({ mode }) {
   const isSignup = mode === 'signup'
@@ -49,9 +38,17 @@ export function Auth({ mode }) {
   }
 
   const demo = async () => {
-    await logInDemo()
-    toast('Signed in as Priya — the demo account')
-    navigate('/home')
+    setError('')
+    setBusy(true)
+    try {
+      await logInDemo()
+      toast('Signed in as Priya — the demo account')
+      navigate('/home')
+    } catch (err) {
+      setError(err.message)
+    } finally {
+      setBusy(false)
+    }
   }
 
   const testimonial = getUser('u_maya')
@@ -97,32 +94,6 @@ export function Auth({ mode }) {
             <p className="muted" style={{ marginTop: 6 }}>{isSignup ? 'Start swapping skills in under two minutes.' : 'Log in to continue swapping skills.'}</p>
           </div>
 
-          {!isSignup && savedAccounts().length > 0 && (
-            <div className="col" style={{ gap: 6 }}>
-              <div className="tiny subtle" style={{ fontWeight: 600 }}>Saved on this device</div>
-              {savedAccounts().slice(0, 3).map((u) => (
-                <button
-                  type="button"
-                  key={u.id}
-                  className="list-item"
-                  style={{ border: `1px solid ${form.email === u.email ? 'var(--purple)' : 'var(--border)'}`, textAlign: 'left', width: '100%' }}
-                  onClick={() => (setForm({ ...form, email: u.email }), setError(''), document.getElementById('password')?.focus())}
-                >
-                  <Avatar user={u} size={36} />
-                  <div className="grow">
-                    <div className="small" style={{ fontWeight: 600 }}>{u.name}</div>
-                    <div className="tiny subtle truncate">{u.email}</div>
-                  </div>
-                  <ArrowRight size={16} color="var(--text-3)" />
-                </button>
-              ))}
-            </div>
-          )}
-
-          <button type="button" className="google-btn" onClick={() => toast('Google sign-in activates once Supabase is connected — use email for now', <Info size={16} color="#93c5fd" />)}>
-            <GoogleIcon /> Continue with Google
-          </button>
-          <div className="divider">or with email</div>
 
           {error && <div className="form-error">{error}</div>}
 
@@ -169,7 +140,7 @@ export function Auth({ mode }) {
             <div className="muted">
               Jump into a lived-in demo account (<code>{DEMO_EMAIL}</code> / <code>{DEMO_PASSWORD}</code>).
             </div>
-            <button type="button" className="btn btn-soft btn-sm" style={{ marginTop: 10 }} onClick={demo}>
+            <button type="button" className="btn btn-soft btn-sm" style={{ marginTop: 10 }} onClick={demo} disabled={busy}>
               Use demo account
             </button>
           </div>

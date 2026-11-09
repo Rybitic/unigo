@@ -1,105 +1,129 @@
--- UniGO schema for Supabase. Mirrors the localStorage data model in src/lib/db.js.
--- Auth users live in auth.users; profiles extend them 1:1.
+-- UniGO database schema for Supabase.
+-- Paste this whole file into Supabase → SQL Editor → New query → Run.
+--
+-- Accounts use Supabase Auth (email + password). Ids are stored as text so
+-- the built-in demo community members (ids like 'u_alex') can take part in
+-- swipes, matches and chats alongside real users (uuid ids).
 
-create table profiles (
+create table if not exists public.profiles (
   id uuid primary key references auth.users on delete cascade,
-  name text not null,
-  avatar text,
-  headline text,
-  university text,
-  bio text,
-  city text,
-  country text,
-  format text check (format in ('online', 'in-person', 'both')) default 'both',
-  available_days text[] default '{}',
-  available_times text[] default '{}',
-  interests text[] default '{}',
-  onboarded boolean default false,
-  created_at timestamptz default now()
+  email text,
+  data jsonb not null default '{}'::jsonb,
+  updated_at timestamptz not null default now()
 );
 
-create table profile_skills (
-  profile_id uuid references profiles on delete cascade,
-  skill text not null,
-  direction text check (direction in ('teach', 'learn')) not null,
-  level text check (level in ('Beginner', 'Intermediate', 'Advanced', 'Expert')) not null,
-  primary key (profile_id, skill, direction)
-);
-
-create table swipes (
-  from_id uuid references profiles on delete cascade,
-  to_id uuid references profiles on delete cascade,
-  action text check (action in ('like', 'pass')) not null,
-  created_at timestamptz default now(),
+create table if not exists public.swipes (
+  from_id text not null,
+  to_id text not null,
+  action text not null check (action in ('like', 'pass')),
+  at bigint not null,
   primary key (from_id, to_id)
 );
 
-create table matches (
-  id uuid primary key default gen_random_uuid(),
-  user_a uuid references profiles on delete cascade,
-  user_b uuid references profiles on delete cascade,
-  created_at timestamptz default now(),
-  unique (user_a, user_b)
+create table if not exists public.matches (
+  id text primary key,
+  user_a text not null,
+  user_b text not null,
+  at bigint not null
 );
 
--- Create a match automatically when a like is reciprocated.
-create function handle_like() returns trigger language plpgsql security definer as $$
-begin
-  if new.action = 'like' and exists (
-    select 1 from swipes where from_id = new.to_id and to_id = new.from_id and action = 'like'
-  ) then
-    insert into matches (user_a, user_b)
-    values (least(new.from_id, new.to_id), greatest(new.from_id, new.to_id))
-    on conflict do nothing;
-  end if;
-  return new;
-end $$;
-create trigger on_like after insert or update on swipes for each row execute function handle_like();
-
-create table messages (
-  id uuid primary key default gen_random_uuid(),
-  match_id uuid references matches on delete cascade,
-  sender_id uuid references profiles on delete cascade,
+create table if not exists public.messages (
+  id text primary key,
+  match_id text not null references public.matches on delete cascade,
+  from_id text not null,
   body text,
-  session_id uuid,
-  created_at timestamptz default now()
+  type text,
+  session_id text,
+  at bigint not null
+);
+create index if not exists messages_match_idx on public.messages (match_id, at);
+
+create table if not exists public.learning_sessions (
+  id text primary key,
+  match_id text not null references public.matches on delete cascade,
+  data jsonb not null,
+  at bigint not null
 );
 
-create table learning_sessions (
-  id uuid primary key default gen_random_uuid(),
-  match_id uuid references matches on delete cascade,
-  proposer uuid references profiles,
-  teacher uuid references profiles,
-  learner uuid references profiles,
-  skill text not null,
-  date date not null,
-  time time not null,
-  duration int not null,
-  format text,
-  place text,
-  note text,
-  status text check (status in ('proposed', 'confirmed', 'completed', 'declined', 'cancelled')) default 'proposed',
-  created_at timestamptz default now()
-);
+-- Helpers ---------------------------------------------------------------
 
--- Row level security: profiles are public to signed-in users; everything
--- else is visible only to the people involved.
-alter table profiles enable row level security;
-alter table profile_skills enable row level security;
-alter table swipes enable row level security;
-alter table matches enable row level security;
-alter table messages enable row level security;
-alter table learning_sessions enable row level security;
+-- Demo community members have ids starting with 'u_'; real users are uuids.
+create or replace function public.is_bot(uid text) returns boolean
+language sql immutable as $$ select uid like 'u\_%' $$;
 
-create policy "read profiles" on profiles for select to authenticated using (true);
-create policy "edit own profile" on profiles for all using (auth.uid() = id);
-create policy "read skills" on profile_skills for select to authenticated using (true);
-create policy "edit own skills" on profile_skills for all using (auth.uid() = profile_id);
-create policy "own swipes" on swipes for all using (auth.uid() = from_id);
-create policy "own matches" on matches for select using (auth.uid() in (user_a, user_b));
-create policy "match messages" on messages for all using (
-  exists (select 1 from matches m where m.id = match_id and auth.uid() in (m.user_a, m.user_b))
-);
-create policy "match sessions" on learning_sessions for all using (
-  exists (select 1 from matches m where m.id = match_id and auth.uid() in (m.user_a, m.user_b))
-);
+create or replace function public.is_match_member(mid text) returns boolean
+language sql stable security definer set search_path = public as $$
+  select exists (
+    select 1 from matches m
+    where m.id = mid and auth.uid()::text in (m.user_a, m.user_b)
+  )
+$$;
+
+-- Lets a signed-in user permanently delete their own account and data.
+create or replace function public.delete_my_account() returns void
+language plpgsql security definer set search_path = public as $$
+declare me text := auth.uid()::text;
+begin
+  if me is null then raise exception 'not signed in'; end if;
+  delete from matches where me in (user_a, user_b);
+  delete from swipes where me in (from_id, to_id);
+  delete from auth.users where id = auth.uid();
+end $$;
+grant execute on function public.delete_my_account() to authenticated;
+
+-- Row level security ----------------------------------------------------
+
+alter table public.profiles enable row level security;
+alter table public.swipes enable row level security;
+alter table public.matches enable row level security;
+alter table public.messages enable row level security;
+alter table public.learning_sessions enable row level security;
+
+drop policy if exists "profiles: read" on public.profiles;
+drop policy if exists "profiles: insert own" on public.profiles;
+drop policy if exists "profiles: update own" on public.profiles;
+create policy "profiles: read" on public.profiles for select to authenticated using (true);
+create policy "profiles: insert own" on public.profiles for insert to authenticated with check (id = auth.uid());
+create policy "profiles: update own" on public.profiles for update to authenticated using (id = auth.uid());
+
+-- You can see swipes you made or received. You write your own swipes, plus
+-- the demo members' responses to you.
+drop policy if exists "swipes: read" on public.swipes;
+drop policy if exists "swipes: write" on public.swipes;
+create policy "swipes: read" on public.swipes for select to authenticated
+  using (auth.uid()::text in (from_id, to_id));
+create policy "swipes: write" on public.swipes for all to authenticated
+  using (from_id = auth.uid()::text or (public.is_bot(from_id) and to_id = auth.uid()::text))
+  with check (from_id = auth.uid()::text or (public.is_bot(from_id) and to_id = auth.uid()::text));
+
+-- A match can only be created when the other person (or demo member) liked you.
+drop policy if exists "matches: read" on public.matches;
+drop policy if exists "matches: create" on public.matches;
+drop policy if exists "matches: delete" on public.matches;
+create policy "matches: read" on public.matches for select to authenticated
+  using (auth.uid()::text in (user_a, user_b));
+create policy "matches: create" on public.matches for insert to authenticated
+  with check (
+    auth.uid()::text in (user_a, user_b) and (
+      public.is_bot(case when user_a = auth.uid()::text then user_b else user_a end)
+      or exists (
+        select 1 from public.swipes s
+        where s.from_id = (case when user_a = auth.uid()::text then user_b else user_a end)
+          and s.to_id = auth.uid()::text and s.action = 'like'
+      )
+    )
+  );
+create policy "matches: delete" on public.matches for delete to authenticated
+  using (auth.uid()::text in (user_a, user_b));
+
+drop policy if exists "messages: read" on public.messages;
+drop policy if exists "messages: send" on public.messages;
+create policy "messages: read" on public.messages for select to authenticated
+  using (public.is_match_member(match_id));
+create policy "messages: send" on public.messages for insert to authenticated
+  with check (public.is_match_member(match_id) and (from_id = auth.uid()::text or public.is_bot(from_id)));
+
+drop policy if exists "sessions: members" on public.learning_sessions;
+create policy "sessions: members" on public.learning_sessions for all to authenticated
+  using (public.is_match_member(match_id))
+  with check (public.is_match_member(match_id));

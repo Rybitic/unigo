@@ -2,6 +2,7 @@ import { ArrowRight, ArrowLeftRight, X, Sparkles, UserPlus, Compass, MessagesSqu
 import { Avatar, Logo, ScoreRing, SkillChip, useToast } from '../components/ui'
 import { navigate } from '../lib/router'
 import { allUsers, currentUser, logInDemo, useDB } from '../lib/db'
+import { SEED_USERS } from '../lib/seed'
 import { CATEGORIES, categoryOf } from '../lib/skills'
 import { computeMatch } from '../lib/matching'
 
@@ -40,7 +41,7 @@ export function Landing() {
   const users = allUsers().filter((u) => u.onboarded)
   const me = currentUser()
   const byId = Object.fromEntries(users.map((u) => [u.id, u]))
-  const priya = byId.u_priya
+  const priya = SEED_USERS.find((u) => u.isDemo)
   const alex = byId.u_alex
   const sofia = byId.u_sofia
   const heroMatch = priya && alex ? computeMatch(priya, alex) : null
@@ -54,9 +55,15 @@ export function Landing() {
 
   const start = () => navigate(me ? '/home' : '/signup')
   const demo = async () => {
-    await logInDemo()
-    toast('Signed in as Priya — the demo account')
-    navigate('/home')
+    if (me) return navigate('/home')
+    toast('Opening the demo account…')
+    try {
+      await logInDemo()
+      toast('Signed in as Priya — the demo account')
+      navigate('/home')
+    } catch (err) {
+      toast(err.message)
+    }
   }
 
   return (

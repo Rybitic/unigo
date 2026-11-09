@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { Bell, Compass, Lock, Shield, Database, LogOut, Trash2, RotateCcw, HardDrive, Cloud } from 'lucide-react'
 import { AppShell } from '../components/AppShell'
 import { Toggle, Modal, useToast } from '../components/ui'
-import { getSettings, updateSettings, changePassword, logOut, deleteAccount, resetDemo, currentUser, useDB } from '../lib/db'
+import { getSettings, updateSettings, changePassword, logOut, deleteAccount, currentUser, useDB } from '../lib/db'
 import { navigate } from '../lib/router'
 
 function Section({ icon: Icon, title, desc, children }) {
@@ -70,15 +70,12 @@ export function Settings() {
           </Section>
 
           <Section icon={Database} title="Data & storage">
-            <Row title="Backend" desc="Where your account and messages are stored">
-              <span className="badge badge-amber" style={{ gap: 6 }}><HardDrive size={12} /> Local demo mode</span>
+            <Row title="Your data" desc="Account, profile, matches and messages">
+              <span className="badge badge-green" style={{ gap: 6 }}><Cloud size={12} /> Saved to your account</span>
             </Row>
             <div className="tiny muted" style={{ padding: '12px 14px', background: 'var(--surface-2)', borderRadius: 12, lineHeight: 1.6 }}>
-              <Cloud size={13} style={{ verticalAlign: -2 }} /> Data is saved in this browser's localStorage. Open a second tab, sign in as another account, and chat in real time. See <code>README.md</code> for connecting Supabase.
+              Everything is stored securely in the UniGO database, so you can log in with your email and password on any device and pick up where you left off.
             </div>
-            <Row title="Reset demo data" desc="Restore sample users and chats (accounts are kept)">
-              <button className="btn btn-secondary btn-sm" onClick={() => setConfirm('reset')}><RotateCcw size={14} /> Reset</button>
-            </Row>
           </Section>
         </div>
 
@@ -98,7 +95,7 @@ export function Settings() {
           </Section>
 
           <div className="card card-pad col" style={{ gap: 10 }}>
-            <button className="btn btn-secondary" onClick={() => (logOut(), navigate('/'))}><LogOut size={16} /> Log out</button>
+            <button className="btn btn-secondary" onClick={async () => (await logOut(), navigate('/'))}><LogOut size={16} /> Log out</button>
             <button className="btn btn-danger" onClick={() => setConfirm('delete')}><Trash2 size={16} /> Delete account</button>
           </div>
         </div>
@@ -107,29 +104,31 @@ export function Settings() {
       <Modal
         open={!!confirm}
         onClose={() => setConfirm(null)}
-        title={confirm === 'delete' ? 'Delete your account?' : 'Reset demo data?'}
+        title="Delete your account?"
         footer={
           <>
             <button className="btn btn-ghost" onClick={() => setConfirm(null)}>Cancel</button>
             <button
               className="btn btn-danger"
               onClick={async () => {
-                if (confirm === 'delete') deleteAccount()
-                else await resetDemo()
-                setConfirm(null)
-                navigate('/')
-                toast(confirm === 'delete' ? 'Account deleted' : 'Demo data restored')
+                try {
+                  await deleteAccount()
+                  setConfirm(null)
+                  navigate('/')
+                  toast('Account deleted')
+                } catch (err) {
+                  setConfirm(null)
+                  toast(err.message)
+                }
               }}
             >
-              {confirm === 'delete' ? 'Delete forever' : 'Reset everything'}
+              Delete forever
             </button>
           </>
         }
       >
         <p className="muted">
-          {confirm === 'delete'
-            ? 'Your profile, matches, messages and sessions will be permanently removed.'
-            : 'This restores the original sample community and clears matches, chats and sessions. Registered accounts and their profiles are kept, so everyone can still sign back in. You will be logged out.'}
+          Your account, profile, matches, messages and sessions will be permanently removed. This can't be undone.
         </p>
       </Modal>
     </AppShell>

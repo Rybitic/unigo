@@ -35,8 +35,11 @@ Click **Try the live demo** on the landing page to sign in as Priya (`priya@unig
 
 ## Data / backend
 
-There were no Supabase credentials, so the app runs in **local demo mode**. Everything is stored in `localStorage`, and the API in `src/lib/db.js` is shaped like the backend tables. Sign-in is stored per tab, so you can open two tabs, sign in as two different accounts, and chat between them in real time.
+Accounts and data live in **Supabase** (Postgres + Auth), so you can log in with your email and password from any device.
 
-`supabase/schema.sql` contains the matching Postgres schema: tables, a trigger that creates a match on a mutual like, and row-level security. To go live, create a Supabase project, run that file, and replace the functions in `src/lib/db.js` with `@supabase/supabase-js` calls. Google sign-in then works through Supabase Auth; in demo mode the button only shows a notice.
+- `supabase/schema.sql` creates the tables (profiles, swipes, matches, messages, learning_sessions) with row-level security, so people can only read and write their own data and their own matches' chats.
+- The browser connects with the project URL and the public anon key, set as `VITE_SUPABASE_URL` / `VITE_SUPABASE_ANON_KEY` (a `.env.local` file locally, repository variables `SUPABASE_URL` / `SUPABASE_ANON_KEY` for the GitHub Pages build).
+- The sample community members are defined in `src/lib/seed.js` and act inside the app. Their likes and replies to you are stored in the database like any other activity.
+- **Try the demo** signs into a shared demo account (`priya@unigo.app` / `demo1234`), which is created with its sample history the first time it is used.
 
-Settings → **Reset demo data** restores the sample community.
+Set-up: create a Supabase project, run `supabase/schema.sql` in the SQL Editor, and turn off **Confirm email** under Authentication → Sign In / Providers → Email (otherwise new users must click an email link before logging in).

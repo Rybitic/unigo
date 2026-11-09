@@ -29,13 +29,15 @@ export function Profile({ route }) {
   const fileRef = useRef()
   useEffect(() => setDraft(me), [me.id])
 
-  const dirty = JSON.stringify(draft) !== JSON.stringify(me)
+  // Only the editable fields; reads/settings change in the background.
+  const editable = ({ reads, settings, avatar, ...rest }) => rest
+  const dirty = JSON.stringify(editable(draft)) !== JSON.stringify(editable(me))
   const set = (k, v) => setDraft((d) => ({ ...d, [k]: v }))
   const toggle = (arr, v) => (arr.includes(v) ? arr.filter((x) => x !== v) : [...arr, v])
   const save = () => {
     if (!draft.name.trim()) return toast('Name cannot be empty')
     if (!draft.teach.length || !draft.learn.length) return toast('Keep at least one skill to teach and one to learn')
-    updateProfile(draft)
+    updateProfile(editable(draft))
     toast('Profile saved')
   }
 

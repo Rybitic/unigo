@@ -51,7 +51,7 @@ export function AppShell({ page, title, actions, children }) {
             <div className="small truncate" style={{ fontWeight: 600 }}>{me.name}</div>
             <div className="tiny subtle truncate">{me.email}</div>
           </div>
-          <button className="icon-btn" title="Log out" onClick={() => (logOut(), navigate('/'))}>
+          <button className="icon-btn" title="Log out" onClick={async () => (await logOut(), navigate('/'))}>
             <LogOut size={17} />
           </button>
         </div>
