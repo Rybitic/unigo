@@ -9,7 +9,7 @@
 
 import { useSyncExternalStore } from 'react'
 import { createClient } from '@supabase/supabase-js'
-import { SEED_USERS, seedActivity, DEMO_EMAIL, DEMO_PASSWORD } from './seed'
+import { SEED_USERS, seedActivity } from './seed'
 import { computeMatch } from './matching'
 import { botReply, botSessionResponse } from './bots'
 import { SUPABASE_URL, SUPABASE_ANON_KEY } from './config'
@@ -50,6 +50,7 @@ function reportError(err) {
 // Run a database write without blocking the UI. Polling pauses while writes
 // are in flight so it never overwrites a change that hasn't landed yet.
 function remote(fn) {
+  if (localDemo) return Promise.resolve()
   pending++
   return Promise.resolve()
     .then(fn)
@@ -79,7 +80,7 @@ const sessionRow = ({ id, matchId, ...data }) => ({ id, match_id: matchId, data,
 // ---------- Loading & sync ----------
 let tick = 0
 async function refresh(withProfiles = false) {
-  if (!authId || pending) return
+  if (!authId || pending || localDemo) return
   const me = authId
   const q = [supabase.from('unigo_swipes').select('*'), supabase.from('unigo_matches').select('*')]
   if (withProfiles) q.push(supabase.from('unigo_profiles').select('id,email,data'))
@@ -147,6 +148,11 @@ function leaveSession() {
 }
 
 export async function initDB() {
+  let demo = false
+  try {
+    demo = sessionStorage.getItem(DEMO_KEY) === '1'
+  } catch {}
+  if (demo) return startDemo()
   if (!supabase) return
   const { data } = await supabase.auth.getSession()
   if (data.session) {
@@ -157,7 +163,7 @@ export async function initDB() {
     }
   }
   supabase.auth.onAuthStateChange((event) => {
-    if (event === 'SIGNED_OUT') leaveSession()
+    if (event === 'SIGNED_OUT' && !localDemo) leaveSession()
   })
   document.addEventListener('visibilitychange', () => !document.hidden && refresh(true))
 }
@@ -215,46 +221,44 @@ export async function logIn({ email, password }) {
   return currentUser()
 }
 
-// The shared demo account. Created (with its lived-in history) the first time anyone uses it.
+// The demo is a sample account that lives only in this browser tab: it shows
+// a lived-in history (matches, chats, sessions) and nothing it does is saved.
+const DEMO_KEY = 'unigo:demo'
+let localDemo = false
+export const isLocalDemo = () => localDemo
+
+function startDemo() {
+  localDemo = true
+  stopPolling()
+  const { likes, ...priya } = SEED_USERS.find((u) => u.isDemo)
+  const act = seedActivity()
+  authId = priya.id
+  state = blank()
+  state.users[authId] = { ...priya, onboarded: true, createdAt: Date.now(), settings: {}, reads: act.reads[authId] || {} }
+  state.swipes = act.swipes
+  state.matches = act.matches
+  state.messages = act.messages
+  state.sessions = act.sessions
+  try {
+    sessionStorage.setItem(DEMO_KEY, '1')
+  } catch {}
+  emit()
+}
+
 export async function logInDemo() {
-  requireBackend()
-  let { data, error } = await supabase.auth.signInWithPassword({ email: DEMO_EMAIL, password: DEMO_PASSWORD })
-  if (error && /invalid login credentials/i.test(error.message)) {
-    ;({ data, error } = await supabase.auth.signUp({ email: DEMO_EMAIL, password: DEMO_PASSWORD, options: { data: { name: 'Priya Sharma' } } }))
-    if (!error && !data.session) throw new Error('Demo account needs email confirmation turned off in Supabase.')
-  }
-  if (error) throw friendly(error)
-  authId = data.user.id
-  await refresh(true)
-  if (!state.users[authId]?.isDemo) await seedDemo(data.user)
-  await enterSession(data.user)
+  if (supabase) await supabase.auth.signOut()
+  startDemo()
   return currentUser()
 }
 
-async function seedDemo(user) {
-  const me = user.id
-  const p = `${me.slice(0, 8)}_`
-  const mapId = (x) => (x === 'u_priya' ? me : x)
-  const { likes, ...priya } = SEED_USERS.find((u) => u.isDemo)
-  const act = seedActivity()
-  const profile = { ...priya, id: me, email: user.email, onboarded: true, createdAt: Date.now(), settings: {}, reads: Object.fromEntries(Object.entries(act.reads.u_priya || {}).map(([k, v]) => [p + k, v])) }
-  const ops = [
-    supabase.from('unigo_profiles').upsert({ id: me, email: user.email, data: strip(profile) }),
-    supabase.from('unigo_swipes').upsert(act.swipes.map((s) => swipeRow({ ...s, from: mapId(s.from), to: mapId(s.to) }))),
-  ]
-  for (const r of await Promise.all(ops)) if (r.error) throw r.error
-  const m = await supabase.from('unigo_matches').upsert(act.matches.map((x) => matchRow({ ...x, id: p + x.id, users: x.users.map(mapId) })))
-  if (m.error) throw m.error
-  const msgs = Object.entries(act.messages).flatMap(([mid, list]) =>
-    list.map((x) => messageRow(p + mid, { ...x, id: p + x.id, from: mapId(x.from), sessionId: x.sessionId && p + x.sessionId })),
-  )
-  const sess = act.sessions.map((s) => sessionRow({ ...s, id: p + s.id, matchId: p + s.matchId, proposer: mapId(s.proposer), partner: mapId(s.partner), teacher: mapId(s.teacher), learner: mapId(s.learner) }))
-  for (const r of await Promise.all([supabase.from('unigo_messages').upsert(msgs), supabase.from('unigo_learning_sessions').upsert(sess)])) if (r.error) throw r.error
-}
-
 export async function logOut() {
+  const wasDemo = localDemo
+  localDemo = false
+  try {
+    sessionStorage.removeItem(DEMO_KEY)
+  } catch {}
   leaveSession()
-  await supabase?.auth.signOut()
+  if (!wasDemo) await supabase?.auth.signOut()
 }
 
 export async function changePassword(oldPw, newPw) {
@@ -280,6 +284,7 @@ export const allUsers = () => Object.values(state.users)
 
 let profileTimer = null
 function saveProfile() {
+  if (localDemo) return
   if (profileTimer) clearTimeout(profileTimer)
   else pending++
   profileTimer = setTimeout(() => {
@@ -509,13 +514,12 @@ export function proposeSession(matchId, data) {
   const partner = m.users.find((u) => u !== me)
   const s = { id: uid('s'), matchId, proposer: me, partner, status: 'proposed', at: Date.now(), ...data }
   state.sessions.push(s)
+  const msg = { id: uid('msg'), from: me, text: '', at: Date.now(), type: 'session', sessionId: s.id }
+  ;(state.messages[matchId] ||= []).push(msg)
+  // The session row must exist before the chat message that points at it.
   remote(async () => {
     const r = await supabase.from('unigo_learning_sessions').insert(sessionRow(s))
-    if (r.error) return r
-    const msg = { id: uid('msg'), from: me, text: '', at: Date.now(), type: 'session', sessionId: s.id }
-    ;(state.messages[matchId] ||= []).push(msg)
-    emit()
-    return supabase.from('unigo_messages').insert(messageRow(matchId, msg))
+    return r.error ? r : supabase.from('unigo_messages').insert(messageRow(matchId, msg))
   })
   emit()
   const other = state.users[partner]

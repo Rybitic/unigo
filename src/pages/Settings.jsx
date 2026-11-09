@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { Bell, Compass, Lock, Shield, Database, LogOut, Trash2, RotateCcw, HardDrive, Cloud } from 'lucide-react'
 import { AppShell } from '../components/AppShell'
 import { Toggle, Modal, useToast } from '../components/ui'
-import { getSettings, updateSettings, changePassword, logOut, deleteAccount, currentUser, useDB } from '../lib/db'
+import { getSettings, updateSettings, changePassword, logOut, deleteAccount, currentUser, useDB, isLocalDemo } from '../lib/db'
 import { navigate } from '../lib/router'
 
 function Section({ icon: Icon, title, desc, children }) {
@@ -71,10 +71,12 @@ export function Settings() {
 
           <Section icon={Database} title="Data & storage">
             <Row title="Your data" desc="Account, profile, matches and messages">
-              <span className="badge badge-green" style={{ gap: 6 }}><Cloud size={12} /> Saved to your account</span>
+              {isLocalDemo() ? <span className="badge badge-amber">Demo — not saved</span> : <span className="badge badge-green" style={{ gap: 6 }}><Cloud size={12} /> Saved to your account</span>}
             </Row>
             <div className="tiny muted" style={{ padding: '12px 14px', background: 'var(--surface-2)', borderRadius: 12, lineHeight: 1.6 }}>
-              Everything is stored securely in the UniGO database, so you can log in with your email and password on any device and pick up where you left off.
+              {isLocalDemo()
+                ? 'You are exploring the demo account. Create your own account to save your profile, matches and messages.'
+                : 'Everything is stored securely in the UniGO database, so you can log in with your email and password on any device and pick up where you left off.'}
             </div>
           </Section>
         </div>

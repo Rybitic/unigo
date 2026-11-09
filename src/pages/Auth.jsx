@@ -3,7 +3,6 @@ import { ArrowLeftRight, Mail, Lock, User, ArrowRight, Eye, EyeOff, Sparkles } f
 import { Avatar, Logo, useToast } from '../components/ui'
 import { getUser, logIn, logInDemo, signUp } from '../lib/db'
 import { navigate } from '../lib/router'
-import { DEMO_EMAIL, DEMO_PASSWORD } from '../lib/seed'
 
 export function Auth({ mode }) {
   const isSignup = mode === 'signup'
@@ -95,7 +94,7 @@ export function Auth({ mode }) {
           </div>
 
 
-          {error && <div className="form-error">{error}</div>}
+          {error && <div className="form-error" style={/^Account created/.test(error) ? { background: 'var(--green-50)', color: '#047857' } : undefined}>{error}</div>}
 
           {isSignup && (
             <div className="field">
@@ -138,7 +137,7 @@ export function Auth({ mode }) {
               <Sparkles size={15} color="var(--purple)" /> Just exploring?
             </div>
             <div className="muted">
-              Jump into a lived-in demo account (<code>{DEMO_EMAIL}</code> / <code>{DEMO_PASSWORD}</code>).
+              Explore UniGO as Priya, a sample student with matches, chats and sessions. Nothing you do in the demo is saved.
             </div>
             <button type="button" className="btn btn-soft btn-sm" style={{ marginTop: 10 }} onClick={demo} disabled={busy}>
               Use demo account
